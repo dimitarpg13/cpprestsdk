@@ -187,11 +187,12 @@ TEST_FIXTURE(uri_address, response_order)
 
     listener.support([](http_request request)
     {
-        auto str = request.extract_string().get();
-        // intentionally break order
-        if (str == U("0"))
-            tests::common::utilities::os_utilities::sleep(500);
-        request.reply(status_codes::OK, str);
+        request.extract_string().then([=](utility::string_t str) {
+            // intentionally break order
+            if (str == U("0"))
+                tests::common::utilities::os_utilities::sleep(100);
+            request.reply(status_codes::OK, str);
+        });
     });
 
     std::vector<pplx::task<web::http::http_response>> responses;
