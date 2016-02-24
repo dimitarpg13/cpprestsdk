@@ -434,7 +434,7 @@ private:
     const web::http::uri m_uri;
     typename web::http::client::http_client m_client;
     std::vector<pplx::task<web::http::http_response>> m_responses;
-    std::vector<test_response*> m_test_responses;
+    std::mutex m_lock;
     
 public:
     _test_http_client(utility::string_t uri) : m_uri(web::http::uri::encode_uri(uri)), m_client(m_uri.authority()) {}
@@ -449,6 +449,7 @@ public:
         void * data,
         size_t data_length)
     {
+        std::lock_guard<std::mutex> lock(m_lock);
         auto localHeaders = headers;
         localHeaders["User-Agent"] = "test_http_client";
         web::http::http_request request;
@@ -471,14 +472,29 @@ public:
 
     test_response * wait_for_response()
     {
-        return wait_for_responses(1)[0];
+        return next_response().get();
     }
     
     pplx::task<test_response *> next_response()
     {
-        return pplx::create_task([this]() -> test_response *
-        {
-            return wait_for_response();
+        std::lock_guard<std::mutex> lock(m_lock);
+        if (m_responses.empty())
+            throw std::logic_error("count too big");
+        auto task = m_responses[0];
+        m_responses.erase(m_responses.begin());
+
+        return task.then([=](web::http::http_response response) {
+            auto tr = new test_response(this);
+            tr->m_status_code = response.status_code();
+            tr->m_reason_phrase = response.reason_phrase();
+            for (auto it = response.headers().begin(); it != response.headers().end(); ++it)
+            {
+                tr->m_headers[it->first] = it->second;
+            }
+            return response.extract_vector().then([=](std::vector<unsigned char> const& v) {
+                tr->m_data = v;
+                return tr;
+            });
         });
     }
     
@@ -487,24 +503,12 @@ public:
         if (count > m_responses.size())
             throw std::logic_error("count too big");
 
-        std::vector<test_response *> m_test_responses;
+        std::vector<test_response *> test_responses;
         for(size_t i = 0; i < count; ++i)
         {
-            auto response = m_responses[0].get();
-
-            auto tr = new test_response(this);
-            tr->m_status_code = response.status_code();
-            tr->m_reason_phrase = response.reason_phrase();
-            for (auto it = response.headers().begin(); it != response.headers().end(); ++it)
-            {
-                tr->m_headers[it->first] = it->second;
-            }
-            tr->m_data = response.extract_vector().get();
-
-            m_test_responses.push_back(tr);
-            m_responses.erase(m_responses.begin());
+            test_responses.push_back(wait_for_response());
         }
-        return m_test_responses;
+        return test_responses;
     }
     
     std::vector<pplx::task<test_response *>> next_responses(const size_t count)
