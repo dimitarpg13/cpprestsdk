@@ -25,7 +25,15 @@
 
 namespace crossplat
 {
-#if (defined(ANDROID) || defined(__ANDROID__))
+
+static std::once_flag g_shared_threadpool_init;
+static std::unique_ptr<threadpool> g_shared_threadpool;
+
+static void init_threadpool(int threads) {
+    g_shared_threadpool.reset(new threadpool(threads));
+}
+
+#if defined(__ANDROID__)
 // This pointer will be 0-initialized by default (at load time).
 std::atomic<JavaVM*> JVM;
 
@@ -54,8 +62,8 @@ JNIEnv* get_jvm_env()
 threadpool& threadpool::shared_instance()
 {
     abort_if_no_jvm();
-    static threadpool s_shared(40);
-    return s_shared;
+    std::call_once(crossplat::g_shared_threadpool_init, crossplat::init_threadpool, 20);
+    return *crossplat::g_shared_threadpool;
 }
 
 #else
@@ -63,8 +71,8 @@ threadpool& threadpool::shared_instance()
 // initialize the static shared threadpool
 threadpool& threadpool::shared_instance()
 {
-    static threadpool s_shared(40);
-    return s_shared;
+    std::call_once(crossplat::g_shared_threadpool_init, crossplat::init_threadpool, 20);
+    return *crossplat::g_shared_threadpool;
 }
 
 #endif
@@ -72,8 +80,23 @@ threadpool& threadpool::shared_instance()
 }
 
 #if defined(__ANDROID__)
-void cpprest_init(JavaVM* vm) {
+void cpprest_init(JavaVM* vm, int default_threadpool_size) {
+    if (crossplat::g_shared_threadpool != nullptr) {
+        // Must call cpprest_init before any other cpprest functionality
+        std::abort();
+    }
+    std::call_once(crossplat::g_shared_threadpool_init, crossplat::init_threadpool, default_threadpool_size);
+
     crossplat::JVM = vm;
+}
+#else
+void cpprest_init(int default_threadpool_size) {
+    if (crossplat::g_shared_threadpool != nullptr) {
+        // Must call cpprest_init before any other cpprest functionality
+        std::abort();
+    }
+
+    std::call_once(crossplat::g_shared_threadpool_init, crossplat::init_threadpool, default_threadpool_size);
 }
 #endif
 

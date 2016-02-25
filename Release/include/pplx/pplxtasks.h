@@ -55,7 +55,9 @@ namespace Concurrency {
 
 #if defined(__ANDROID__)
 #include <jni.h>
-void cpprest_init(JavaVM*);
+void cpprest_init(JavaVM*, int default_threadpool_size = 20);
+#else
+void cpprest_init(int default_threadpool_size = 20);
 #endif
 
 // Cannot build using a compiler that is older than dev10 SP1
