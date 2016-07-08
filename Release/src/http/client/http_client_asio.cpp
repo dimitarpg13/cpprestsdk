@@ -421,7 +421,7 @@ public:
 
             m_context->m_timer.start();
 
-            tcp::resolver::query query(proxy_host, utility::conversions::print_string(proxy_port, std::locale::classic()));
+            tcp::resolver::query query(proxy_host, utility::details::print_string(proxy_port));
 
             auto client = std::static_pointer_cast<asio_client>(m_context->m_http_client);
             client->m_resolver.async_resolve(query, boost::bind(&ssl_proxy_tunnel::handle_resolve, shared_from_this(), boost::asio::placeholders::error, boost::asio::placeholders::iterator));
@@ -684,7 +684,7 @@ public:
                 auto tcp_host = proxy_type == http_proxy_type::http ? proxy_host : host;
                 auto tcp_port = proxy_type == http_proxy_type::http ? proxy_port : port;
                     
-                tcp::resolver::query query(tcp_host, utility::conversions::print_string(tcp_port, std::locale::classic()));
+                tcp::resolver::query query(tcp_host, utility::details::print_string(tcp_port));
                 auto client = std::static_pointer_cast<asio_client>(ctx->m_http_client);
                 client->m_resolver.async_resolve(query, boost::bind(&asio_context::handle_resolve, ctx, boost::asio::placeholders::error, boost::asio::placeholders::iterator));
             }
@@ -742,7 +742,7 @@ private:
         
         auto credential_str = web::details::plaintext_string(new ::utility::string_t(m_http_client->client_config().proxy().credentials().username()));
         credential_str->append(":");
-        credential_str->append(*m_http_client->client_config().proxy().credentials().decrypt());
+        credential_str->append(*m_http_client->client_config().proxy().credentials()._decrypt());
         
         std::vector<unsigned char> credentials_buffer(credential_str->begin(), credential_str->end());
         
