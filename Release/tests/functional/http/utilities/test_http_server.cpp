@@ -12,6 +12,7 @@
 
 #ifdef _WIN32
 #include <http.h>
+#pragma comment(lib, "httpapi.lib")
 #pragma warning ( push )
 #pragma warning ( disable : 4457 )
 #include <agents.h>

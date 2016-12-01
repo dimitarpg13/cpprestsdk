@@ -30,3 +30,7 @@ set(SOURCES
 )
 
 add_casablanca_test(httpclient_test SOURCES)
+
+if(WIN32)
+  target_link_libraries(httpclient_test winhttp)
+endif()
