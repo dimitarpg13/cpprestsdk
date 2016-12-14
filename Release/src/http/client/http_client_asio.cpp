@@ -90,7 +90,8 @@ public:
     asio_connection(boost::asio::io_service& io_service)
         : m_socket(io_service),
         m_is_reused(false),
-        m_keep_alive(true)
+        m_keep_alive(true),
+        m_closed(false)
     {}
 
     ~asio_connection()
@@ -119,6 +120,7 @@ public:
 
         // Ensures closed connections owned by request_context will not be put to pool when they are released.
         m_keep_alive = false;
+        m_closed = true;
 
         boost::system::error_code error;
         m_socket.shutdown(tcp::socket::shutdown_both, error);
@@ -141,8 +143,14 @@ public:
     template <typename Iterator, typename Handler>
     void async_connect(const Iterator &begin, const Handler &handler)
     {
-        std::lock_guard<std::mutex> lock(m_socket_lock);
-        m_socket.async_connect(begin, handler);
+        std::unique_lock<std::mutex> lock(m_socket_lock);
+        if (!m_closed)
+            m_socket.async_connect(begin, handler);
+        else
+        {
+            lock.unlock();
+            handler(boost::asio::error::operation_aborted);
+        }
     }
 
     template <typename HandshakeHandler, typename CertificateHandler>
@@ -232,6 +240,7 @@ private:
 
     bool m_is_reused;
     bool m_keep_alive;
+    bool m_closed;
 };
 
 /// <summary>Implements a connection pool with adaptive connection removal</summary>
@@ -476,12 +485,6 @@ public:
                 m_context->m_timer.reset();
                 auto endpoint = *endpoints;
                 m_context->m_connection->async_connect(endpoint, boost::bind(&ssl_proxy_tunnel::handle_tcp_connect, shared_from_this(), boost::asio::placeholders::error, ++endpoints));
-
-                // TODO: refactor all interactions with the timeout_timer to avoid racing
-                if (m_context->m_timer.has_timedout())
-                {
-                    m_context->m_connection->close();
-                }
             }
         }
 
@@ -700,9 +703,11 @@ public:
                     ctx->m_needChunked = true;
                     extra_headers.append("Transfer-Encoding:chunked\r\n");
                 }
-                else
+                else if (ctx->m_request.method() == methods::POST)
                 {
-                    // Howver, if there is no body, then just send 0 length.
+                    // Some servers do not accept POST requests with a content length of 0, such as
+                    // lighttpd - http://serverfault.com/questions/315849/curl-post-411-length-required
+                    // old apache versions - https://issues.apache.org/jira/browse/TS-2902
                     extra_headers.append("Content-Length: 0\r\n");
                 }
             }
@@ -847,7 +852,6 @@ private:
 
     void handle_connect(const boost::system::error_code& ec, tcp::resolver::iterator endpoints)
     {
-       
         m_timer.reset();
         if (!ec)
         {
@@ -883,12 +887,6 @@ private:
             m_timer.reset();
             auto endpoint = *endpoints;
             m_connection->async_connect(endpoint, boost::bind(&asio_context::handle_connect, shared_from_this(), boost::asio::placeholders::error, ++endpoints));
-
-            // TODO: refactor all interactions with the timeout_timer to avoid racing
-            if (m_timer.has_timedout())
-            {
-                m_connection->close();
-            }
         }
     }
 

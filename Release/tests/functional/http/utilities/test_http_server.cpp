@@ -175,61 +175,59 @@ struct ConcRTOversubscribe
     }
 };
 
-class _test_http_server
+struct test_server_queue
+{
+    void on_request(std::unique_ptr<test_request> req)
+    {
+
+    }
+};
+
+class _test_http_server_win32
 {
     inline bool is_error_code(ULONG error_code)
     {
-        return error_code == ERROR_OPERATION_ABORTED || error_code == ERROR_CONNECTION_INVALID || error_code == ERROR_NETNAME_DELETED
-            || m_isClosing;
+        return error_code == ERROR_OPERATION_ABORTED || error_code == ERROR_CONNECTION_INVALID || error_code == ERROR_NETNAME_DELETED;
     }
 public:
-    _test_http_server(const utility::string_t &uri)
-        : m_uri(uri), m_session(0), m_url_group(0), m_request_queue(nullptr), m_isClosing(false)
-    {
-        HTTPAPI_VERSION httpApiVersion = HTTPAPI_VERSION_2;
-        HttpInitialize(httpApiVersion, HTTP_INITIALIZE_SERVER, NULL);
-    }
-    ~_test_http_server()
-    {
-        HttpTerminate(HTTP_INITIALIZE_SERVER, NULL);
-    }
-
-    unsigned long open()
+    _test_http_server_win32(const web::uri &uri)
+        : m_uri(uri), m_session(0), m_url_group(0), m_request_queue(nullptr)
     {
         // Open server session.
         HTTPAPI_VERSION httpApiVersion = HTTPAPI_VERSION_2;
+        HttpInitialize(httpApiVersion, HTTP_INITIALIZE_SERVER, NULL);
         ULONG error_code = HttpCreateServerSession(httpApiVersion, &m_session, 0);
-        if(error_code)
+        if (error_code)
         {
-            return error_code;
+            throw std::runtime_error("error code: " + std::to_string(error_code));
         }
 
         // Create Url group.
         error_code = HttpCreateUrlGroup(m_session, &m_url_group, 0);
-        if(error_code)
+        if (error_code)
         {
-            return error_code;
+            throw std::runtime_error("error code: " + std::to_string(error_code));
         }
 
         // Create request queue.
         error_code = HttpCreateRequestQueue(httpApiVersion, U("test_http_server"), NULL, NULL, &m_request_queue);
-        if(error_code)
+        if (error_code)
         {
-            return error_code;
+            throw std::runtime_error("error code: " + std::to_string(error_code));
         }
 
         // Windows HTTP Server API will not accept a uri with an empty path, it must have a '/'.
-        auto host_uri = m_uri.to_string();
-        if(m_uri.is_path_empty() && host_uri[host_uri.length() - 1] != '/' && m_uri.query().empty() && m_uri.fragment().empty())
+        auto host_uri = uri.to_string();
+        if (uri.is_path_empty() && host_uri[host_uri.length() - 1] != '/' && uri.query().empty() && uri.fragment().empty())
         {
             host_uri.append(U("/"));
         }
 
         // Add Url.
         error_code = HttpAddUrlToUrlGroup(m_url_group, host_uri.c_str(), (HTTP_URL_CONTEXT)this, 0);
-        if(error_code)
+        if (error_code)
         {
-            return error_code;
+            throw std::runtime_error("error code: " + std::to_string(error_code));
         }
 
         // Associate Url group with request queue.
@@ -237,142 +235,127 @@ public:
         bindingInfo.RequestQueueHandle = m_request_queue;
         bindingInfo.Flags.Present = 1;
         error_code = HttpSetUrlGroupProperty(m_url_group, HttpServerBindingProperty, &bindingInfo, sizeof(HTTP_BINDING_INFO));
-        if(error_code)
+        if (error_code)
         {
-            return error_code;
+            throw std::runtime_error("error code: " + std::to_string(error_code));
         }
-        
-        // Spawn a task to handle receiving incoming requests.
-        m_request_task = pplx::create_task([this]()
-        {
-            ConcRTOversubscribe osubs; // Oversubscription for long running ConcRT tasks
-            for(;;)
-            {
-                const ULONG buffer_length = 1024 * 4;
-                char buffer[buffer_length];
-                ULONG bytes_received = 0;
-                HTTP_REQUEST *p_http_request = (HTTP_REQUEST *)buffer;
+    }
+    ~_test_http_server_win32() {
+        m_thread.join();
 
-                // Read in everything except the body.
-                ULONG error_code2 = HttpReceiveHttpRequest(
-                    m_request_queue,
-                    HTTP_NULL_ID,
-                    0,
-                    p_http_request,
-                    buffer_length,
-                    &bytes_received,
-                    0);
-                if (is_error_code(error_code2))
-                    break;
-                else
-                    VERIFY_ARE_EQUAL(0, error_code2);
-
-                // Now create request structure.
-                auto p_test_request = new test_request();
-                m_requests_memory.push_back(p_test_request);
-                p_test_request->m_request_id = p_http_request->RequestId;
-                p_test_request->m_p_server = this;
-                p_test_request->m_path = utf8_to_utf16(p_http_request->pRawUrl);
-                p_test_request->m_method = parse_verb(p_http_request);
-                p_test_request->m_headers = parse_http_headers(p_http_request->Headers);
-
-                // Read in request body.
-                ULONG content_length;
-                const bool has_content_length = p_test_request->match_header(U("Content-Length"), content_length);
-                if(has_content_length && content_length > 0)
-                {
-                    p_test_request->m_body.resize(content_length);
-                    auto result = 
-                        HttpReceiveRequestEntityBody(
-                            m_request_queue,
-                            p_http_request->RequestId,
-                            HTTP_RECEIVE_REQUEST_ENTITY_BODY_FLAG_FILL_BUFFER,
-                            &p_test_request->m_body[0],
-                            content_length,
-                            &bytes_received,
-                            NULL);
-                    if (is_error_code(result))
-                        break;
-                    else
-                        VERIFY_ARE_EQUAL(0, result);
-                }
-
-                utility::string_t transfer_encoding;
-                const bool has_transfer_encoding = p_test_request->match_header(U("Transfer-Encoding"), transfer_encoding);
-                if(has_transfer_encoding && transfer_encoding == U("chunked"))
-                {
-                    content_length = 0;
-                    char buf[4096];
-                    auto result = 
-                        HttpReceiveRequestEntityBody(
-                            m_request_queue,
-                            p_http_request->RequestId,
-                            HTTP_RECEIVE_REQUEST_ENTITY_BODY_FLAG_FILL_BUFFER,
-                            (LPVOID)buf,
-                            4096,
-                            &bytes_received,
-                            NULL);
-
-                    while ( result == NO_ERROR )
-                    {
-                        content_length += bytes_received;
-                        p_test_request->m_body.resize(content_length);
-                        memcpy(&p_test_request->m_body[content_length-bytes_received], buf, bytes_received);
-
-                        result = 
-                            HttpReceiveRequestEntityBody(
-                                m_request_queue,
-                                p_http_request->RequestId,
-                                HTTP_RECEIVE_REQUEST_ENTITY_BODY_FLAG_FILL_BUFFER,
-                                (LPVOID)buf,
-                                4096,
-                                &bytes_received,
-                                NULL);
-                    }
-
-                    if (is_error_code(result))
-                        break;
-                    else
-                        VERIFY_ARE_EQUAL(ERROR_HANDLE_EOF, result);
-                }
-
-                // Place request buffer.
-                Concurrency::asend(m_requests, p_test_request);
-            }
-        });
-        
-        return 0;
+        HttpTerminate(HTTP_INITIALIZE_SERVER, NULL);
     }
 
-    unsigned long close()
+    std::unique_ptr<test_request> sync_get_request(_test_http_server* th)
     {
-        // Wait for all outstanding next_requests to be processed. A hang here means the test case
-        // isn't making sure all the requests have been satisfied. We will only wait for 1 minute and then
-        // allow the test case to continue anyway. This should be enough time for any outstanding requests to come
-        // in and avoid causing an AV. 
-        //
-        // If the requests haven't been fullfilled by now then there is a test bug so we still will mark failure.
-        bool allRequestsSatisfied = true;
-        std::for_each(m_all_next_request_tasks.begin(), m_all_next_request_tasks.end(), [&](pplx::task<test_request *> request_task)
-        {
-            if(!request_task.is_done())
-            {
-                allRequestsSatisfied = false;
-            }
-        });
+        ConcRTOversubscribe osubs; // Oversubscription for long running ConcRT tasks
+        const ULONG buffer_length = 1024 * 4;
+        char buffer[buffer_length];
+        ULONG bytes_received = 0;
+        HTTP_REQUEST *p_http_request = (HTTP_REQUEST *)buffer;
 
-        if(!allRequestsSatisfied)
+        // Read in everything except the body.
+        ULONG error_code2 = HttpReceiveHttpRequest(
+            m_request_queue,
+            HTTP_NULL_ID,
+            0,
+            p_http_request,
+            buffer_length,
+            &bytes_received,
+            0);
+        if (!is_error_code(error_code2))
         {
-            // Just wait for either all the requests to finish or for the timer task, it doesn't matter which one.
-            auto allRequestsTask = pplx::when_all(m_all_next_request_tasks.begin(), m_all_next_request_tasks.end()).then([](const std::vector<test_request *> &){});
-            auto timerTask = pplx::create_task([]() { ::tests::common::utilities::os_utilities::sleep(30000); });
-            (timerTask || allRequestsTask).wait();
-            VERIFY_IS_TRUE(false, "HTTP test case didn't properly wait for all requests to be satisfied.");
+            VERIFY_ARE_EQUAL(0, error_code2);
         }
 
-        // Signal shutting down
-        m_isClosing = true;
+        if (error_code2 != 0)
+        {
+            return nullptr;
+        }
 
+        // Now create request structure.
+        auto p_test_request = std::unique_ptr<test_request>(new test_request(p_http_request->RequestId, th));
+        p_test_request->m_path = utf8_to_utf16(p_http_request->pRawUrl);
+        p_test_request->m_method = parse_verb(p_http_request);
+        p_test_request->m_headers = parse_http_headers(p_http_request->Headers);
+
+        // Read in request body.
+        ULONG content_length;
+        const bool has_content_length = p_test_request->match_header(U("Content-Length"), content_length);
+        if(has_content_length && content_length > 0)
+        {
+            p_test_request->m_body.resize(content_length);
+            auto result = 
+                HttpReceiveRequestEntityBody(
+                    m_request_queue,
+                    p_http_request->RequestId,
+                    HTTP_RECEIVE_REQUEST_ENTITY_BODY_FLAG_FILL_BUFFER,
+                    &p_test_request->m_body[0],
+                    content_length,
+                    &bytes_received,
+                    NULL);
+            if (is_error_code(result))
+                return nullptr;
+            else
+                VERIFY_ARE_EQUAL(0, result);
+        }
+
+        utility::string_t transfer_encoding;
+        const bool has_transfer_encoding = p_test_request->match_header(U("Transfer-Encoding"), transfer_encoding);
+        if (has_transfer_encoding && transfer_encoding == U("chunked"))
+        {
+            content_length = 0;
+            char buf[4096];
+            auto result =
+                HttpReceiveRequestEntityBody(
+                    m_request_queue,
+                    p_http_request->RequestId,
+                    HTTP_RECEIVE_REQUEST_ENTITY_BODY_FLAG_FILL_BUFFER,
+                    (LPVOID)buf,
+                    4096,
+                    &bytes_received,
+                    NULL);
+
+            while (result == NO_ERROR)
+            {
+                content_length += bytes_received;
+                p_test_request->m_body.resize(content_length);
+                memcpy(&p_test_request->m_body[content_length - bytes_received], buf, bytes_received);
+
+                result =
+                    HttpReceiveRequestEntityBody(
+                        m_request_queue,
+                        p_http_request->RequestId,
+                        HTTP_RECEIVE_REQUEST_ENTITY_BODY_FLAG_FILL_BUFFER,
+                        (LPVOID)buf,
+                        4096,
+                        &bytes_received,
+                        NULL);
+            }
+
+            if (is_error_code(result))
+                return nullptr;
+            else
+                VERIFY_ARE_EQUAL(ERROR_HANDLE_EOF, result);
+        }
+
+        return p_test_request;
+    }
+    void open(_test_http_server* th, on_test_server_request& on_request)
+    {
+        m_thread = std::thread([this](_test_http_server* th, on_test_server_request* cb) {
+            for (;;)
+            {
+                auto req = this->sync_get_request(th);
+                if (req == nullptr)
+                    break;
+
+                cb->on_request(std::move(req));
+            }
+        }, th, &on_request);
+    }
+    unsigned long close()
+    {
         // Windows HTTP Server API will not accept a uri with an empty path, it must have a '/'.
         utility::string_t host_uri = m_uri.to_string();
         if(m_uri.is_path_empty() && host_uri[host_uri.length() - 1] != '/' && m_uri.query().empty() && m_uri.fragment().empty())
@@ -389,17 +372,10 @@ public:
 
         // Stop request queue.
         error_code = HttpShutdownRequestQueue(m_request_queue);
-        m_request_task.wait();
         if(error_code)
         {
             return error_code;
         }
-
-        // Release memory for each request.
-        std::for_each(m_requests_memory.begin(), m_requests_memory.end(), [](test_request *p_request)
-        {
-            delete p_request;
-        });
 
         // Close all resources.
         HttpCloseRequestQueue(m_request_queue);
@@ -409,74 +385,100 @@ public:
         return 0;
     }
 
-    test_request * wait_for_request()
+    unsigned long sync_reply(
+        const unsigned long long request_id,
+        const unsigned short status_code,
+        const utility::string_t &reason_phrase,
+        const std::map<utility::string_t, utility::string_t> &headers,
+        void * data,
+        size_t data_length)
     {
-        return wait_for_requests(1)[0];
-    }
+        ConcRTOversubscribe osubs; // Oversubscription for long running ConcRT tasks
+        HTTP_RESPONSE response;
+        ZeroMemory(&response, sizeof(HTTP_RESPONSE));
+        response.StatusCode = status_code;
+        std::string reason(reason_phrase.begin(), reason_phrase.end());
+        response.pReason = reason.c_str();
+        response.ReasonLength = (USHORT)reason.length();
 
-    pplx::task<test_request *> next_request()
-    {
-        auto next_request_task = pplx::create_task([this]() -> test_request *
-        {
-            return wait_for_request();
-        });
-        m_all_next_request_tasks.push_back(next_request_task);
-        return next_request_task;
-    }
+        // Add headers.
+        std::vector<std::string> headers_buffer;
+        response.Headers.UnknownHeaderCount = (USHORT)headers.size() + 1;
+        response.Headers.pUnknownHeaders = new HTTP_UNKNOWN_HEADER[headers.size() + 1];
+        headers_buffer.resize(headers.size() * 2 + 2);
 
-    std::vector<pplx::task<test_request *>> next_requests(const size_t count)
-    {
-        std::vector<pplx::task_completion_event<test_request *>> events;
-        std::vector<pplx::task<test_request *>> requests;
-        for(size_t i = 0; i < count; ++i)
+        // Add the no cache header.
+        headers_buffer[0] = "Cache-Control";
+        headers_buffer[1] = "no-cache";
+        response.Headers.pUnknownHeaders[0].NameLength = (USHORT)headers_buffer[0].size();
+        response.Headers.pUnknownHeaders[0].pName = headers_buffer[0].c_str();
+        response.Headers.pUnknownHeaders[0].RawValueLength = (USHORT)headers_buffer[1].size();
+        response.Headers.pUnknownHeaders[0].pRawValue = headers_buffer[1].c_str();
+
+        // Add all other headers.
+        if (!headers.empty())
         {
-            events.push_back(pplx::task_completion_event<test_request *>());
-            auto next_request_task = pplx::create_task(events[i]);
-            requests.push_back(next_request_task);
-            m_all_next_request_tasks.push_back(next_request_task);
-        }
-        pplx::create_task([this, count, events]()
-        {
-            for(size_t i = 0; i < count; ++i)
+            int headerIndex = 1;
+            for (auto iter = headers.begin(); iter != headers.end(); ++iter, ++headerIndex)
             {
-                events[i].set(wait_for_request());
+                headers_buffer[headerIndex * 2] = utf16_to_utf8(iter->first);
+                headers_buffer[headerIndex * 2 + 1] = utf16_to_utf8(iter->second);
+
+                // TFS 624150
+#pragma warning (push)
+#pragma warning (disable : 6386)
+                response.Headers.pUnknownHeaders[headerIndex].NameLength = (USHORT)headers_buffer[headerIndex * 2].size();
+#pragma warning (pop)
+
+                response.Headers.pUnknownHeaders[headerIndex].pName = headers_buffer[headerIndex * 2].c_str();
+                response.Headers.pUnknownHeaders[headerIndex].RawValueLength = (USHORT)headers_buffer[headerIndex * 2 + 1].size();
+                response.Headers.pUnknownHeaders[headerIndex].pRawValue = headers_buffer[headerIndex * 2 + 1].c_str();
             }
-        });
-        return requests;
-    }
-
-    std::vector<test_request *> wait_for_requests(const size_t count)
-    {
-        std::vector<test_request *> m_test_requests;
-        for(size_t i = 0; i < count; ++i)
-        {
-            m_test_requests.push_back(Concurrency::receive(m_requests));
         }
-        return m_test_requests;
+
+        // Add body.
+        response.EntityChunkCount = 0;
+        HTTP_DATA_CHUNK dataChunk;
+        if (data_length != 0)
+        {
+            response.EntityChunkCount = 1;
+            dataChunk.DataChunkType = HttpDataChunkFromMemory;
+            dataChunk.FromMemory.pBuffer = (void *)data;
+            dataChunk.FromMemory.BufferLength = (ULONG)data_length;
+            response.pEntityChunks = &dataChunk;
+        }
+
+        // Synchronously sending the request.
+        unsigned long error_code = HttpSendHttpResponse(
+            m_request_queue,
+            request_id,
+            HTTP_SEND_RESPONSE_FLAG_DISCONNECT,
+            &response,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL);
+
+        // Free memory needed for headers.
+        if (response.Headers.UnknownHeaderCount != 0)
+        {
+            delete[] response.Headers.pUnknownHeaders;
+        }
+
+        return error_code;
     }
-
 private:
-    friend class test_request;
-
-    ::http::uri m_uri;
-    pplx::task<void> m_request_task;
-    Concurrency::unbounded_buffer<test_request *> m_requests;
-
-    // Used to store all requests to simplify memory management.
-    std::vector<test_request *> m_requests_memory;
-
-    // Used to store all tasks created to wait on requests to catch any test cases
-    // which fail to make sure any next_request tasks have completed before exiting.
-    // Test cases rarely use more than a couple so it is ok to store them all.
-    std::vector<pplx::task<test_request *>> m_all_next_request_tasks;
-
+    web::uri m_uri;
     HTTP_SERVER_SESSION_ID m_session;
     HTTP_URL_GROUP_ID m_url_group;
     HANDLE m_request_queue;
-    std::atomic<bool> m_isClosing;
+
+    std::thread m_thread;
 };
 #else
-class _test_http_server
+class _test_http_server_internal
 {
 private:
     const utility::string_t m_uri;
@@ -490,7 +492,7 @@ private:
     volatile std::atomic<int> m_cancel;
 
 public:
-    _test_http_server(const utility::string_t& uri)
+    _test_http_server_internal(const utility::string_t& uri)
         : m_uri(uri) 
         , m_listener(uri)
         , m_last_request_id(0)
@@ -529,7 +531,7 @@ public:
         });
     }
 
-    ~_test_http_server()
+    ~_test_http_server_internal()
     {
         close();
     }
@@ -612,127 +614,71 @@ public:
 };
 #endif
 
-unsigned long test_request::reply(const unsigned short status_code)
+class _test_http_server final : private on_test_server_request
 {
-    return reply(status_code, U(""));
-}
-
-unsigned long test_request::reply(const unsigned short status_code, const utility::string_t &reason_phrase)
-{
-    return reply(status_code, reason_phrase, std::map<utility::string_t, utility::string_t>(), "");
-}
-
-unsigned long test_request::reply(
-    const unsigned short status_code, 
-    const utility::string_t &reason_phrase, 
-    const std::map<utility::string_t, utility::string_t> &headers)
-{
-    return reply(status_code, reason_phrase, headers, U(""));
-}
-
-unsigned long test_request::reply(
-        const unsigned short status_code, 
-        const utility::string_t &reason_phrase,
-        const std::map<utility::string_t, utility::string_t> &headers,
-        const utf8string &data)
-{
-    return reply_impl(status_code, reason_phrase, headers, (void *)&data[0], data.size() * sizeof(utf8char));
-}
-
-unsigned long test_request::reply(
-        const unsigned short status_code, 
-        const utility::string_t &reason_phrase, 
-        const std::map<utility::string_t, utility::string_t> &headers,
-        const utf16string &data)
-{
-    return reply_impl(status_code, reason_phrase, headers, (void *)&data[0], data.size() * sizeof(utf16char));
-}
+private:
+    std::mutex m_lock;
+    std::deque<pplx::task_completion_event<test_request*>> m_requests;
+    std::vector<std::unique_ptr<test_request>> m_requests_memory;
+    std::atomic<int> m_cancel;
 
 #if defined(_WIN32)
-unsigned long test_request::reply_impl(
-        const unsigned short status_code, 
-        const utility::string_t &reason_phrase, 
-        const std::map<utility::string_t, utility::string_t> &headers,
-        void * data,
-        size_t data_length)
-{
-    ConcRTOversubscribe osubs; // Oversubscription for long running ConcRT tasks
-    HTTP_RESPONSE response;
-    ZeroMemory(&response, sizeof(HTTP_RESPONSE));
-    response.StatusCode = status_code;
-    std::string reason(reason_phrase.begin(), reason_phrase.end());
-    response.pReason = reason.c_str();
-    response.ReasonLength = (USHORT)reason.length();
+    _test_http_server_win32 m_impl;
+#else
+    _test_http_server_internal m_impl;
+#endif
 
-    // Add headers.
-    std::vector<std::string> headers_buffer;
-    response.Headers.UnknownHeaderCount = (USHORT)headers.size() + 1;
-    response.Headers.pUnknownHeaders = new HTTP_UNKNOWN_HEADER[headers.size() + 1];
-    headers_buffer.resize(headers.size() * 2 + 2);
-
-    // Add the no cache header.
-    headers_buffer[0] = "Cache-Control";
-    headers_buffer[1] = "no-cache";
-    response.Headers.pUnknownHeaders[0].NameLength = (USHORT)headers_buffer[0].size();
-    response.Headers.pUnknownHeaders[0].pName = headers_buffer[0].c_str();
-    response.Headers.pUnknownHeaders[0].RawValueLength = (USHORT)headers_buffer[1].size();
-    response.Headers.pUnknownHeaders[0].pRawValue = headers_buffer[1].c_str();
-
-    // Add all other headers.
-    if(!headers.empty())
+public:
+    _test_http_server(const web::uri& uri)
+        : m_impl(uri)
+        , m_cancel(0)
     {
-        int headerIndex = 1;
-        for(auto iter = headers.begin(); iter != headers.end(); ++iter, ++headerIndex)
+        m_impl.open(this, *this);
+    }
+
+    virtual void on_request(std::unique_ptr<test_request> req) override
+    {
+        std::lock_guard<std::mutex> lk(m_lock);
+        VERIFY_IS_FALSE(m_requests.empty(), "There are no pending calls to next_request.");
+        if (m_requests.empty())
+            return;
+        auto tce = std::move(m_requests.front());
+        m_requests.pop_front();
+        m_requests_memory.push_back(std::move(req));
+        tce.set(m_requests_memory.back().get());
+    }
+
+    ~_test_http_server()
+    {
+        VERIFY_ARE_EQUAL(0, m_impl.close());
+
         {
-            headers_buffer[headerIndex * 2] = utf16_to_utf8(iter->first);
-            headers_buffer[headerIndex * 2 + 1] = utf16_to_utf8(iter->second);
-
-// TFS 624150
-#pragma warning (push)
-#pragma warning (disable : 6386)
-            response.Headers.pUnknownHeaders[headerIndex].NameLength = (USHORT)headers_buffer[headerIndex * 2].size();
-#pragma warning (pop)
-
-            response.Headers.pUnknownHeaders[headerIndex].pName = headers_buffer[headerIndex * 2].c_str();
-            response.Headers.pUnknownHeaders[headerIndex].RawValueLength = (USHORT)headers_buffer[headerIndex * 2 + 1].size();
-            response.Headers.pUnknownHeaders[headerIndex].pRawValue = headers_buffer[headerIndex * 2 + 1].c_str();
+            std::lock_guard<std::mutex> lk(m_lock);
+            for (auto&& tce : m_requests)
+                tce.set_exception(std::runtime_error("test_http_server closed."));
         }
     }
 
-    // Add body.
-    response.EntityChunkCount = 0;
-    HTTP_DATA_CHUNK dataChunk;
-    if(data_length != 0)
+    unsigned long send_reply(
+        unsigned long long request_id,
+        const unsigned short status_code,
+        const utility::string_t &reason_phrase,
+        const std::map<utility::string_t, utility::string_t> &headers,
+        void * data,
+        size_t data_length)
     {
-        response.EntityChunkCount = 1;
-        dataChunk.DataChunkType = HttpDataChunkFromMemory;
-        dataChunk.FromMemory.pBuffer = (void *)data;
-        dataChunk.FromMemory.BufferLength = (ULONG)data_length;
-        response.pEntityChunks = &dataChunk;
-    }
-    
-    // Synchronously sending the request.
-    unsigned long error_code = HttpSendHttpResponse(
-        m_p_server->m_request_queue,
-        m_request_id,
-        HTTP_SEND_RESPONSE_FLAG_DISCONNECT,
-        &response,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL);
-
-    // Free memory needed for headers.
-    if(response.Headers.UnknownHeaderCount != 0)
-    {
-       delete [] response.Headers.pUnknownHeaders;
+        return m_impl.sync_reply(request_id, status_code, reason_phrase, headers, data, data_length);
     }
 
-    return error_code;
-}
-#else
+    pplx::task<test_request *> next_request()
+    {
+        pplx::task_completion_event<test_request*> tce;
+        std::lock_guard<std::mutex> lock(m_lock);
+        m_requests.push_back(tce);
+        return pplx::create_task(tce);
+    }
+};
+
 unsigned long test_request::reply_impl(
         const unsigned short status_code, 
         const utility::string_t &reason_phrase, 
@@ -742,22 +688,23 @@ unsigned long test_request::reply_impl(
 {
     return m_p_server->send_reply(m_request_id, status_code, reason_phrase, headers, data, data_length);
 }
-#endif
 
-test_http_server::test_http_server(const web::http::uri &uri) { m_p_impl = new _test_http_server(uri.to_string()); }
+test_http_server::test_http_server(const web::http::uri &uri)
+{
+    m_p_impl = std::unique_ptr<_test_http_server>(new _test_http_server(uri));
+}
 
-test_http_server::~test_http_server() { delete m_p_impl; }
-
-unsigned long test_http_server::open() { return m_p_impl->open(); }
-
-unsigned long test_http_server::close() { return m_p_impl->close(); }
-
-test_request * test_http_server::wait_for_request() { return m_p_impl->wait_for_request(); }
+test_http_server::~test_http_server() { }
 
 pplx::task<test_request *> test_http_server::next_request() { return m_p_impl->next_request(); }
 
-std::vector<test_request *> test_http_server::wait_for_requests(const size_t count) { return m_p_impl->wait_for_requests(count); }
-
-std::vector<pplx::task<test_request *>> test_http_server::next_requests(const size_t count) { return m_p_impl->next_requests(count); }
+std::vector<pplx::task<test_request *>> test_http_server::next_requests(const size_t count)
+{
+    std::vector<pplx::task<test_request *>> ret;
+    ret.reserve(count);
+    for (size_t x = 0; x < count; ++x)
+        ret.push_back(next_request());
+    return ret;
+}
 
 }}}}
