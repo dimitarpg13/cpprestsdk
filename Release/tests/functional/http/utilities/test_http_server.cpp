@@ -17,12 +17,13 @@
 #pragma warning ( disable : 4457 )
 #include <agents.h>
 #pragma warning ( pop )
+#else
+#include "cpprest/http_listener.h"
 #endif
 #include <algorithm>
 
 #include "cpprest/uri.h"
 #include "test_http_server.h"
-#include "cpprest/http_listener.h"
 
 #include <os_utilities.h>
 
@@ -31,6 +32,41 @@ using namespace utility;
 using namespace utility::conversions;
 
 namespace tests { namespace functional { namespace http { namespace utilities {
+
+
+struct test_server_queue
+{
+    std::mutex m_lock;
+    std::deque<pplx::task_completion_event<test_request*>> m_requests;
+    std::vector<std::unique_ptr<test_request>> m_requests_memory;
+
+    ~test_server_queue()
+    {
+        std::lock_guard<std::mutex> lk(m_lock);
+        for (auto&& tce : m_requests)
+            tce.set_exception(std::runtime_error("test_http_server closed."));
+    }
+
+    void on_request(std::unique_ptr<test_request> req)
+    {
+        std::lock_guard<std::mutex> lk(m_lock);
+        VERIFY_IS_FALSE(m_requests.empty(), "There are no pending calls to next_request.");
+        if (m_requests.empty())
+            return;
+        auto tce = std::move(m_requests.front());
+        m_requests.pop_front();
+        m_requests_memory.push_back(std::move(req));
+        tce.set(m_requests_memory.back().get());
+    }
+
+    pplx::task<test_request *> next_request()
+    {
+        pplx::task_completion_event<test_request*> tce;
+        std::lock_guard<std::mutex> lock(m_lock);
+        m_requests.push_back(tce);
+        return pplx::create_task(tce);
+    }
+};
 
 #if defined(_WIN32)
 // Helper function to parse verb from Windows HTTP Server API.
@@ -175,22 +211,14 @@ struct ConcRTOversubscribe
     }
 };
 
-struct test_server_queue
-{
-    void on_request(std::unique_ptr<test_request> req)
-    {
-
-    }
-};
-
-class _test_http_server_win32
+class _test_http_server
 {
     inline bool is_error_code(ULONG error_code)
     {
-        return error_code == ERROR_OPERATION_ABORTED || error_code == ERROR_CONNECTION_INVALID || error_code == ERROR_NETNAME_DELETED;
+        return error_code == ERROR_OPERATION_ABORTED || error_code == ERROR_CONNECTION_INVALID || error_code == ERROR_NETNAME_DELETED || m_closing == 1;
     }
 public:
-    _test_http_server_win32(const web::uri &uri)
+    _test_http_server(const web::uri &uri)
         : m_uri(uri), m_session(0), m_url_group(0), m_request_queue(nullptr)
     {
         // Open server session.
@@ -239,14 +267,29 @@ public:
         {
             throw std::runtime_error("error code: " + std::to_string(error_code));
         }
+
+        // Launch listener thread
+        m_thread = std::thread([](_test_http_server* self) {
+            for (;;)
+            {
+                auto req = self->sync_get_request();
+                if (req == nullptr)
+                    break;
+
+                self->m_queue.on_request(std::move(req));
+            }
+        }, this);
     }
-    ~_test_http_server_win32() {
+
+    ~_test_http_server() {
+        VERIFY_ARE_EQUAL(0, close());
+
         m_thread.join();
 
         HttpTerminate(HTTP_INITIALIZE_SERVER, NULL);
     }
 
-    std::unique_ptr<test_request> sync_get_request(_test_http_server* th)
+    std::unique_ptr<test_request> sync_get_request()
     {
         ConcRTOversubscribe osubs; // Oversubscription for long running ConcRT tasks
         const ULONG buffer_length = 1024 * 4;
@@ -274,7 +317,7 @@ public:
         }
 
         // Now create request structure.
-        auto p_test_request = std::unique_ptr<test_request>(new test_request(p_http_request->RequestId, th));
+        auto p_test_request = std::unique_ptr<test_request>(new test_request(p_http_request->RequestId, this));
         p_test_request->m_path = utf8_to_utf16(p_http_request->pRawUrl);
         p_test_request->m_method = parse_verb(p_http_request);
         p_test_request->m_headers = parse_http_headers(p_http_request->Headers);
@@ -341,21 +384,11 @@ public:
 
         return p_test_request;
     }
-    void open(_test_http_server* th, on_test_server_request& on_request)
-    {
-        m_thread = std::thread([this](_test_http_server* th, on_test_server_request* cb) {
-            for (;;)
-            {
-                auto req = this->sync_get_request(th);
-                if (req == nullptr)
-                    break;
 
-                cb->on_request(std::move(req));
-            }
-        }, th, &on_request);
-    }
     unsigned long close()
     {
+        m_closing = 1;
+
         // Windows HTTP Server API will not accept a uri with an empty path, it must have a '/'.
         utility::string_t host_uri = m_uri.to_string();
         if(m_uri.is_path_empty() && host_uri[host_uri.length() - 1] != '/' && m_uri.query().empty() && m_uri.fragment().empty())
@@ -385,7 +418,7 @@ public:
         return 0;
     }
 
-    unsigned long sync_reply(
+    unsigned long send_reply(
         const unsigned long long request_id,
         const unsigned short status_code,
         const utility::string_t &reason_phrase,
@@ -469,7 +502,13 @@ public:
 
         return error_code;
     }
+
+public:
+    test_server_queue m_queue;
+
 private:
+    std::atomic<int> m_closing = 0;
+
     web::uri m_uri;
     HTTP_SERVER_SESSION_ID m_session;
     HTTP_URL_GROUP_ID m_url_group;
@@ -478,75 +517,51 @@ private:
     std::thread m_thread;
 };
 #else
-class _test_http_server_internal
+class _test_http_server
 {
+public:
+    test_server_queue m_queue;
+
 private:
-    const utility::string_t m_uri;
-    typename web::http::experimental::listener::http_listener m_listener;
-    pplx::extensibility::critical_section_t m_lock;
-    std::vector<pplx::task_completion_event<test_request*>> m_requests;
+    web::http::experimental::listener::http_listener m_listener;
+
     std::atomic<unsigned long> m_last_request_id;
 
+    std::mutex m_response_lock;
     std::unordered_map<unsigned long long, web::http::http_request> m_responding_requests;
 
-    volatile std::atomic<int> m_cancel;
-
 public:
-    _test_http_server_internal(const utility::string_t& uri)
-        : m_uri(uri) 
-        , m_listener(uri)
+    _test_http_server(const web::uri& uri)
+        : m_listener(uri)
         , m_last_request_id(0)
-        , m_cancel(0)
     {
         m_listener.support([&](web::http::http_request result) -> void
         {
-            auto tr = new test_request();
+            auto tr = std::unique_ptr<test_request>(new test_request(this->m_last_request_id++, this));
             tr->m_method = result.method();
             tr->m_path = result.request_uri().resource().to_string();
             if (tr->m_path.empty())
                 tr->m_path = U("/");
 
-            tr->m_p_server = this;
-            tr->m_request_id = ++m_last_request_id;
             for (auto it = result.headers().begin(); it != result.headers().end(); ++it)
                 tr->m_headers[it->first] = it->second;
         
             tr->m_body = result.extract_vector().get();
 
             {
-                pplx::extensibility::scoped_critical_section_t lock(m_lock);
+                std::lock_guard<std::mutex> lock(m_response_lock);
                 m_responding_requests[tr->m_request_id] = result;
             }
 
-            while (!m_cancel)
-            {
-                pplx::extensibility::scoped_critical_section_t lock(m_lock);
-                if (m_requests.size() > 0)
-                {
-                    m_requests[0].set(tr);
-                    m_requests.erase(m_requests.begin());
-                    return;
-                }
-            }
+            m_queue.on_request(std::move(tr));
         });
+
+        m_listener.open().wait();
     }
 
-    ~_test_http_server_internal()
+    ~_test_http_server()
     {
-        close();
-    }
-
-    unsigned long open() { m_listener.open().wait(); return 0;}
-    unsigned long close()
-    {
-        ++m_cancel;
         m_listener.close().wait();
-        return 0;
-    }
-
-    test_request * wait_for_request()
-    {
-        return next_request().get();
     }
 
     unsigned long send_reply(
@@ -559,7 +574,7 @@ public:
     {
         web::http::http_request request;
         {
-            pplx::extensibility::scoped_critical_section_t lock(m_lock);
+            std::lock_guard<std::mutex> lock(m_response_lock);
             auto it = m_responding_requests.find(request_id);
             if (it == m_responding_requests.end())
                 throw std::runtime_error("no such request awaiting response");
@@ -578,106 +593,12 @@ public:
         std::vector<unsigned char> body_data(data_bytes, data_bytes + data_length);
         response.set_body(std::move(body_data));
 
-        request.reply(response);
+        request.reply(response).get();
 
         return 0;
     }
-
-    pplx::extensibility::critical_section_t m_next_request_lock;
-    pplx::task<test_request *> next_request()
-    {
-        pplx::task_completion_event<test_request*> tce;
-        pplx::extensibility::scoped_critical_section_t lock(m_lock);
-        m_requests.push_back(tce);
-        return pplx::create_task(tce);
-    }
-
-    std::vector<pplx::task<test_request *>> next_requests(const size_t count)
-    {
-        std::vector<pplx::task<test_request*>> result;
-        for (size_t i = 0; i < count; ++i)
-        {
-            result.push_back(next_request());
-        }
-        return result;
-    }
-
-    std::vector<test_request *> wait_for_requests(const size_t count)
-    {
-        std::vector<test_request*> requests;
-        for (size_t i = 0; i < count; ++i)
-        {
-            requests.push_back(wait_for_request());
-        }
-        return requests;
-    }
 };
 #endif
-
-class _test_http_server final : private on_test_server_request
-{
-private:
-    std::mutex m_lock;
-    std::deque<pplx::task_completion_event<test_request*>> m_requests;
-    std::vector<std::unique_ptr<test_request>> m_requests_memory;
-    std::atomic<int> m_cancel;
-
-#if defined(_WIN32)
-    _test_http_server_win32 m_impl;
-#else
-    _test_http_server_internal m_impl;
-#endif
-
-public:
-    _test_http_server(const web::uri& uri)
-        : m_impl(uri)
-        , m_cancel(0)
-    {
-        m_impl.open(this, *this);
-    }
-
-    virtual void on_request(std::unique_ptr<test_request> req) override
-    {
-        std::lock_guard<std::mutex> lk(m_lock);
-        VERIFY_IS_FALSE(m_requests.empty(), "There are no pending calls to next_request.");
-        if (m_requests.empty())
-            return;
-        auto tce = std::move(m_requests.front());
-        m_requests.pop_front();
-        m_requests_memory.push_back(std::move(req));
-        tce.set(m_requests_memory.back().get());
-    }
-
-    ~_test_http_server()
-    {
-        VERIFY_ARE_EQUAL(0, m_impl.close());
-
-        {
-            std::lock_guard<std::mutex> lk(m_lock);
-            for (auto&& tce : m_requests)
-                tce.set_exception(std::runtime_error("test_http_server closed."));
-        }
-    }
-
-    unsigned long send_reply(
-        unsigned long long request_id,
-        const unsigned short status_code,
-        const utility::string_t &reason_phrase,
-        const std::map<utility::string_t, utility::string_t> &headers,
-        void * data,
-        size_t data_length)
-    {
-        return m_impl.sync_reply(request_id, status_code, reason_phrase, headers, data, data_length);
-    }
-
-    pplx::task<test_request *> next_request()
-    {
-        pplx::task_completion_event<test_request*> tce;
-        std::lock_guard<std::mutex> lock(m_lock);
-        m_requests.push_back(tce);
-        return pplx::create_task(tce);
-    }
-};
 
 unsigned long test_request::reply_impl(
         const unsigned short status_code, 
@@ -696,7 +617,7 @@ test_http_server::test_http_server(const web::http::uri &uri)
 
 test_http_server::~test_http_server() { }
 
-pplx::task<test_request *> test_http_server::next_request() { return m_p_impl->next_request(); }
+pplx::task<test_request *> test_http_server::next_request() { return m_p_impl->m_queue.next_request(); }
 
 std::vector<pplx::task<test_request *>> test_http_server::next_requests(const size_t count)
 {
