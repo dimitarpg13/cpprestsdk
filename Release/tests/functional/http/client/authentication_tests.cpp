@@ -52,7 +52,7 @@ SUITE(authentication_tests)
 
 TEST_FIXTURE(uri_address, auth_no_data, "Ignore:Linux", "89", "Ignore:Apple", "89")
 {
-    pplx::task<void> t;
+    pplx::task<void> t, t2;
     {
         test_http_server::scoped_server scoped(m_uri);
         http_client_config client_config;
@@ -62,12 +62,6 @@ TEST_FIXTURE(uri_address, auth_no_data, "Ignore:Linux", "89", "Ignore:Apple", "8
         const method mtd = methods::POST;
 
         http_request msg(mtd);
-
-        auto replyFunc = [&](test_request *p_request)
-        {
-            http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"));
-            p_request->reply(200);
-        };
 
         t = scoped.server()->next_request().then([&](test_request *p_request)
         {
@@ -80,22 +74,26 @@ TEST_FIXTURE(uri_address, auth_no_data, "Ignore:Linux", "89", "Ignore:Apple", "8
             // unauthorized
             p_request->reply(status_codes::Unauthorized, U("Authentication Failed"), headers);
 
-        }).then([&scoped, replyFunc]()
+        });
+        t2 = scoped.server()->next_request().then([&](test_request *p_request)
         {
-            // Client resent the request
-            return scoped.server()->next_request().then(replyFunc);
+            http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"));
+            p_request->reply(200);
         });
 
         http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
     }
-    t.get();
+    try { t.get(); }
+    catch (...) { VERIFY_ARE_EQUAL(0, 1); }
+    try { t2.get(); }
+    catch (...) { VERIFY_ARE_EQUAL(0, 1); }
 }
 
 // TFS 648783
 #ifndef __cplusplus_winrt
 TEST_FIXTURE(uri_address, proxy_auth_known_contentlength, "Ignore:Linux", "88", "Ignore:Apple", "88")
 {
-    pplx::task<void> t;
+    pplx::task<void> t, t2;
     {
         test_http_server::scoped_server scoped(m_uri);
         http_client_config client_config;
@@ -108,13 +106,6 @@ TEST_FIXTURE(uri_address, proxy_auth_known_contentlength, "Ignore:Linux", "88", 
         http_request msg(mtd);
         msg.set_body(contents);
 
-        auto replyFunc = [&](test_request *p_request)
-        {
-            http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"), U("text/plain; charset=utf-8"), contents);
-
-            p_request->reply(200);
-        };
-
         t = scoped.server()->next_request().then([&](test_request *p_request)
         {
             http_asserts::assert_test_request_equals(p_request, mtd, U("/"));
@@ -126,15 +117,21 @@ TEST_FIXTURE(uri_address, proxy_auth_known_contentlength, "Ignore:Linux", "88", 
             // unauthorized
             p_request->reply(status_codes::Unauthorized, U("Authentication Failed"), headers);
 
-        }).then([&scoped, replyFunc]()
+        });
+
+        t2 = scoped.server()->next_request().then([&](test_request *p_request)
         {
-            // Client resent the request
-            return scoped.server()->next_request().then(replyFunc);
+            http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"), U("text/plain; charset=utf-8"), contents);
+
+            p_request->reply(200);
         });
 
         http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
     }
-    t.get();
+    try { t.get(); }
+    catch (...) { VERIFY_ARE_EQUAL(0, 1); }
+    try { t2.get(); }
+    catch (...) { VERIFY_ARE_EQUAL(0, 1); }
 }
 #endif
 

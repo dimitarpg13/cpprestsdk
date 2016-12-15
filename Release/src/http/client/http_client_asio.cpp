@@ -703,9 +703,9 @@ public:
                     ctx->m_needChunked = true;
                     extra_headers.append("Transfer-Encoding:chunked\r\n");
                 }
-                else if (ctx->m_request.method() == methods::POST)
+                else if (ctx->m_request.method() == methods::POST || ctx->m_request.method() == methods::PUT)
                 {
-                    // Some servers do not accept POST requests with a content length of 0, such as
+                    // Some servers do not accept POST/PUT requests with a content length of 0, such as
                     // lighttpd - http://serverfault.com/questions/315849/curl-post-411-length-required
                     // old apache versions - https://issues.apache.org/jira/browse/TS-2902
                     extra_headers.append("Content-Length: 0\r\n");

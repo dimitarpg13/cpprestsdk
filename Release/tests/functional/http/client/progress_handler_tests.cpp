@@ -372,7 +372,8 @@ TEST_FIXTURE(uri_address, data_upload_exception)
         t = scoped.server()->next_request();
         VERIFY_THROWS(client.request(msg).get(), std::invalid_argument);
     }
-    t.get();
+    try { t.get(); }
+    catch (const std::runtime_error&) { /* It is ok if the request does not complete before the server is shutdown */ }
 }
 
 TEST_FIXTURE(uri_address, data_download_exception, "Ignore:Windows", "395")
