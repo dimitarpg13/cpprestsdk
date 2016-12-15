@@ -110,6 +110,9 @@ public:
     TEST_UTILITY_API pplx::task<test_request *> next_request();
     TEST_UTILITY_API std::vector<pplx::task<test_request *>> next_requests(const size_t count);
 
+    // Enable early close
+    TEST_UTILITY_API void close();
+
     // RAII pattern for test_http_server.
     class scoped_server;
 

@@ -65,8 +65,9 @@ TEST_FIXTURE(uri_address, simple_values)
         p_request->reply(200);
     });
     http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
-    t1.get();
-    t2.get();
+    p_server->close();
+    try { t1.get(); } catch (...) { VERIFY_ARE_EQUAL(0, 1, "t1 failed"); }
+    try { t2.get(); } catch (...) { VERIFY_ARE_EQUAL(0, 2, "t2 failed"); }
 }
 
 TEST_FIXTURE(uri_address, body_types)

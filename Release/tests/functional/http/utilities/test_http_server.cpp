@@ -561,6 +561,11 @@ public:
 
     ~_test_http_server()
     {
+        close();
+    }
+
+    void close()
+    {
         m_listener.close().wait();
     }
 
@@ -627,5 +632,7 @@ std::vector<pplx::task<test_request *>> test_http_server::next_requests(const si
         ret.push_back(next_request());
     return ret;
 }
+
+void test_http_server::close() { m_p_impl->close(); }
 
 }}}}
