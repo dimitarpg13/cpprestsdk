@@ -32,45 +32,41 @@ SUITE(building_request_tests)
 TEST_FIXTURE(uri_address, simple_values)
 {
     pplx::task<void> t1, t2;
+    test_http_server::scoped_server scoped(m_uri);
+    test_http_server * p_server = scoped.server();
+    http_client client(m_uri);
+
+    // Set a method.
+    const method method = methods::OPTIONS;
+    http_request msg(method);
+    VERIFY_ARE_EQUAL(method, msg.method());
+
+    // Set a path once.
+    const utility::string_t custom_path1 = U("/hey/custom/path");
+    msg.set_request_uri(custom_path1);
+    VERIFY_ARE_EQUAL(custom_path1, msg.relative_uri().to_string());
+    t1 = p_server->next_request().then([&](test_request *p_request)
     {
-        test_http_server::scoped_server scoped(m_uri);
-        test_http_server * p_server = scoped.server();
-        http_client client(m_uri);
+        http_asserts::assert_test_request_equals(p_request, method, custom_path1);
+        p_request->reply(200);
+    });
+    http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
 
-        // Set a method.
-        const method method = methods::OPTIONS;
-        http_request msg(method);
-        VERIFY_ARE_EQUAL(method, msg.method());
-
-        // Set a path once.
-        const utility::string_t custom_path1 = U("/hey/custom/path");
-        msg.set_request_uri(custom_path1);
-        VERIFY_ARE_EQUAL(custom_path1, msg.relative_uri().to_string());
-        t1 = p_server->next_request().then([&](test_request *p_request)
-        {
-            http_asserts::assert_test_request_equals(p_request, method, custom_path1);
-            p_request->reply(200);
-        });
-        http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
-
-        // Set the path twice.
-        msg = http_request(method);
-        msg.set_request_uri(custom_path1);
-        VERIFY_ARE_EQUAL(custom_path1, msg.relative_uri().to_string());
-        const utility::string_t custom_path2 = U("/yes/you/there");
-        msg.set_request_uri(custom_path2);
-        VERIFY_ARE_EQUAL(custom_path2, msg.relative_uri().to_string());
-        t2 = p_server->next_request().then([&](test_request *p_request)
-        {
-            http_asserts::assert_test_request_equals(p_request, method, custom_path2);
-            p_request->reply(200);
-        });
-        http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
-    }
-    try { t1.get(); }
-    catch (...) { VERIFY_ARE_EQUAL(0, 1); }
-    try { t2.get(); }
-    catch (...) { VERIFY_ARE_EQUAL(0, 1); }
+    // Set the path twice.
+    msg = http_request(method);
+    msg.set_request_uri(custom_path1);
+    VERIFY_ARE_EQUAL(custom_path1, msg.relative_uri().to_string());
+    const utility::string_t custom_path2 = U("/yes/you/there");
+    msg.set_request_uri(custom_path2);
+    VERIFY_ARE_EQUAL(custom_path2, msg.relative_uri().to_string());
+    t2 = p_server->next_request().then([&](test_request *p_request)
+    {
+        http_asserts::assert_test_request_equals(p_request, method, custom_path2);
+        p_request->reply(200);
+    });
+    http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
+    t1.get();
+    t2.get();
 }
 
 TEST_FIXTURE(uri_address, body_types)
