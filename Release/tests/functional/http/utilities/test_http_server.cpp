@@ -536,7 +536,7 @@ public:
         : m_listener(uri)
         , m_last_request_id(0)
     {
-        m_listener.support([&](web::http::http_request result) -> void
+        auto handler = [this](web::http::http_request result) -> void
         {
             auto tr = std::unique_ptr<test_request>(new test_request(this->m_last_request_id++, this));
             tr->m_method = result.method();
@@ -546,7 +546,7 @@ public:
 
             for (auto it = result.headers().begin(); it != result.headers().end(); ++it)
                 tr->m_headers[it->first] = it->second;
-        
+
             tr->m_body = result.extract_vector().get();
 
             {
@@ -555,7 +555,10 @@ public:
             }
 
             m_queue.on_request(std::move(tr));
-        });
+        };
+        m_listener.support(handler);
+        m_listener.support(web::http::methods::OPTIONS, handler);
+        m_listener.support(web::http::methods::TRCE, handler);
 
         m_listener.open().wait();
     }
