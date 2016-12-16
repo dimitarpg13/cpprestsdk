@@ -40,11 +40,16 @@ struct test_server_queue
     std::deque<pplx::task_completion_event<test_request*>> m_requests;
     std::vector<std::unique_ptr<test_request>> m_requests_memory;
 
-    ~test_server_queue()
+    void close()
     {
         std::lock_guard<std::mutex> lk(m_lock);
         for (auto&& tce : m_requests)
             tce.set_exception(std::runtime_error("test_http_server closed."));
+    }
+
+    ~test_server_queue()
+    {
+        close();
     }
 
     void on_request(std::unique_ptr<test_request> req)
@@ -415,6 +420,8 @@ public:
         HttpCloseUrlGroup(m_url_group);
         HttpCloseServerSession(m_session);
 
+        m_queue.close();
+
         return 0;
     }
 
@@ -567,6 +574,7 @@ public:
     void close()
     {
         m_listener.close().wait();
+        m_queue.close();
     }
 
     unsigned long send_reply(
