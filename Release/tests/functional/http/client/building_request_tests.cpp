@@ -267,37 +267,37 @@ TEST_FIXTURE(uri_address, set_content_length_locale, "Ignore:Android", "Locale u
 TEST_FIXTURE(uri_address, set_port_locale, "Ignore:Android", "Locale unsupported on Android")
 {
     pplx::task<void> t;
+    test_http_server::scoped_server scoped(m_uri);
+    http_client client(m_uri);
+
+    utility::string_t data(U("STRING data 1000"));
+    t = scoped.server()->next_request().then([&](test_request *p_request)
     {
-        test_http_server::scoped_server scoped(m_uri);
-        http_client client(m_uri);
+        http_asserts::assert_test_request_equals(p_request, methods::PUT, U("/"), U("text/plain; charset=utf-8"), data);
+        p_request->reply(200);
+    });
 
-        utility::string_t data(U("STRING data 1000"));
-        t = scoped.server()->next_request().then([&](test_request *p_request)
-        {
-            http_asserts::assert_test_request_equals(p_request, methods::PUT, U("/"), U("text/plain; charset=utf-8"), data);
-            p_request->reply(200);
-        });
-
-        std::locale changedLocale;
-        try
-        {
+    std::locale changedLocale;
+    try
+    {
 #ifdef _WIN32
-            changedLocale = std::locale("fr-FR");
+        changedLocale = std::locale("fr-FR");
 #else
-            changedLocale = std::locale("fr_FR.UTF-8");
+        changedLocale = std::locale("fr_FR.UTF-8");
 #endif
-        }
-        catch (const std::exception &)
-        {
-            // Silently pass if locale isn't installed on machine.
-            return;
-        }
-
-        tests::common::utilities::locale_guard loc(changedLocale);
-        http_request msg(methods::PUT);
-        msg.set_body(data);
-        http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
     }
+    catch (const std::exception &)
+    {
+        // Silently pass if locale isn't installed on machine.
+        return;
+    }
+
+    tests::common::utilities::locale_guard loc(changedLocale);
+    http_request msg(methods::PUT);
+    msg.set_body(data);
+    http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
+
+    scoped.server()->close();
     t.get();
 }
 
