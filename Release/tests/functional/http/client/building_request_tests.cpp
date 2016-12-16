@@ -31,8 +31,8 @@ SUITE(building_request_tests)
 
 TEST_FIXTURE(uri_address, simple_values)
 {
-    pplx::task<void> t1, t2;
     test_http_server::scoped_server scoped(m_uri);
+    pplx::task<void> t1, t2;
     test_http_server * p_server = scoped.server();
     http_client client(m_uri);
 
@@ -266,8 +266,8 @@ TEST_FIXTURE(uri_address, set_content_length_locale, "Ignore:Android", "Locale u
 
 TEST_FIXTURE(uri_address, set_port_locale, "Ignore:Android", "Locale unsupported on Android")
 {
-    pplx::task<void> t;
     test_http_server::scoped_server scoped(m_uri);
+    pplx::task<void> t;
     http_client client(m_uri);
 
     utility::string_t data(U("STRING data 1000"));

@@ -26,6 +26,7 @@
 #include "test_http_server.h"
 
 #include <os_utilities.h>
+#include <mutex>
 
 using namespace web; 
 using namespace utility;
@@ -287,7 +288,7 @@ public:
     }
 
     ~_test_http_server() {
-        VERIFY_ARE_EQUAL(0, close());
+        close();
 
         m_thread.join();
 
@@ -311,11 +312,6 @@ public:
             buffer_length,
             &bytes_received,
             0);
-        if (!is_error_code(error_code2))
-        {
-            VERIFY_ARE_EQUAL(0, error_code2);
-        }
-
         if (error_code2 != 0)
         {
             return nullptr;
@@ -342,10 +338,8 @@ public:
                     content_length,
                     &bytes_received,
                     NULL);
-            if (is_error_code(result))
+            if (result != 0)
                 return nullptr;
-            else
-                VERIFY_ARE_EQUAL(0, result);
         }
 
         utility::string_t transfer_encoding;
