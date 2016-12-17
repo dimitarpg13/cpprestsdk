@@ -485,7 +485,7 @@ TEST_FIXTURE(server_properties, set_user_options, "Requires", "Server;UserName;P
     VERIFY_ARE_EQUAL(200, client.request(request).get().status_code());
 }
 
-TEST_FIXTURE(uri_address, auth_producer_comsumer_buffer)
+TEST_FIXTURE(uri_address, auth_producer_consumer_buffer)
 {
     auto buf = streams::producer_consumer_buffer<unsigned char>();
     buf.putc('a').get();
@@ -503,30 +503,28 @@ TEST_FIXTURE(uri_address, auth_producer_comsumer_buffer)
     config.set_credentials(web::credentials(U("USERNAME"), U("PASSWORD")));
 
     http_client client(m_uri, config);
-    pplx::task<void> t;
+
+    pplx::task<void> t, t2;
+    test_http_server::scoped_server scoped(m_uri);
+
+    t = scoped.server()->next_request().then([&](test_request *p_request)
     {
-        test_http_server::scoped_server scoped(m_uri);
+        http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"), U("application/octet-stream"), U("aaaa"));
+        std::map<utility::string_t, utility::string_t> headers;
+        headers[U("WWW-Authenticate")] = U("Basic realm = \"WallyWorld\"");
 
-        auto replyFunc = [&](test_request *p_request)
-        {
-            http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"), U("application/octet-stream"), U("aaaa"));
-            p_request->reply(200);
-        };
+        p_request->reply(status_codes::Unauthorized, U("Authentication Failed"), headers);
+    });
+    t2 = scoped.server()->next_request().then([&](test_request *p_request)
+    {
+        http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"), U("application/octet-stream"), U("aaaa"));
+        p_request->reply(200);
+    });
 
-        t = scoped.server()->next_request().then([&](test_request *p_request)
-        {
-            http_asserts::assert_test_request_equals(p_request, methods::POST, U("/"), U("application/octet-stream"), U("aaaa"));
-            std::map<utility::string_t, utility::string_t> headers;
-            headers[U("WWW-Authenticate")] = U("Basic realm = \"WallyWorld\"");
-
-            p_request->reply(status_codes::Unauthorized, U("Authentication Failed"), headers);
-        }).then([&scoped, replyFunc]() {
-            return scoped.server()->next_request().then(replyFunc);
-        });
-
-        http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
-    }
-    t.get();
+    http_asserts::assert_response_equals(client.request(msg).get(), status_codes::OK);
+    scoped.server()->close();
+    VERIFY_NO_THROWS(t.get());
+    VERIFY_NO_THROWS(t2.get());
 }
 
 TEST_FIXTURE(uri_address, auth_producer_comsumer_buffer_fail_no_cred)
@@ -598,7 +596,7 @@ TEST_FIXTURE(uri_address, auth_producer_comsumer_buffer_fail)
 
         http_asserts::assert_response_equals(client.request(msg).get(), status_codes::Unauthorized);
     }
-    t.get();
+    VERIFY_NO_THROWS(t.get());
 }
 #endif
 

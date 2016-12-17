@@ -110,24 +110,19 @@ TEST_FIXTURE(uri_address, server_close_without_responding)
     config.set_timeout(utility::seconds(1));
 
     http_client client(m_uri, config);
-    pplx::task<void> response;
-    pplx::task<void> t;
-    {
-        test_http_server::scoped_server server(m_uri);
+    test_http_server::scoped_server server(m_uri);
+    auto t = server.server()->next_request();
 
-        t = server.server()->next_request().then([](test_request*) {});
+    // Send request.
+    auto response = client.request(methods::PUT);
 
-        // Send request.
-        response = client.request(methods::PUT).then([](const http_response&) {});
+    // Wait for request
+    VERIFY_NO_THROWS(t.get());
 
-        // Wait for response received
-        (t || response).wait();
+    // Close server connection.
+    server.server()->close();
 
-        // Close server connection.
-    }
     VERIFY_THROWS_HTTP_ERROR_CODE(response.wait(), std::errc::connection_aborted);
-
-    t.get();
 
     // Try sending another request.
     VERIFY_THROWS_HTTP_ERROR_CODE(client.request(methods::GET).wait(), std::errc::host_unreachable);
