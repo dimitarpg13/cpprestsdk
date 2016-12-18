@@ -432,7 +432,7 @@ TEST_FIXTURE(uri_address, cancel_bad_port)
 
     // Send request.
     http_client_config config;
-    config.set_timeout(std::chrono::milliseconds(500));
+    config.set_timeout(std::chrono::milliseconds(1000));
     http_client c(uri, config);
     web::http::http_request r;
     auto cts = pplx::cancellation_token_source();
